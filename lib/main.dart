@@ -19,7 +19,16 @@ void main() async {
   );
 }
 
-// ================== 1. MODEL DATA (SERIALIZABLE) ==================
+// ================== 1. MODEL DATA (ANTI-CRASH VERSION) ==================
+
+// Helper agar tidak error saat convert angka
+double safeDouble(dynamic value) {
+  if (value == null) return 0.0;
+  if (value is int) return value.toDouble();
+  if (value is double) return value;
+  if (value is String) return double.tryParse(value) ?? 0.0;
+  return 0.0;
+}
 
 class MaterialItem {
   String id;
@@ -40,7 +49,6 @@ class MaterialItem {
 
   double get pricePerUnit => (quantity > 0) ? totalCost / quantity : 0.0;
 
-  // Mengubah Object ke JSON (untuk disimpan)
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
@@ -50,15 +58,14 @@ class MaterialItem {
     'unit': unit,
   };
 
-  // Mengubah JSON ke Object (untuk diload)
   factory MaterialItem.fromJson(Map<String, dynamic> json) {
     return MaterialItem(
-      id: json['id'],
-      name: json['name'],
-      supplier: json['supplier'],
-      totalCost: (json['totalCost'] as num).toDouble(),
-      quantity: (json['quantity'] as num).toDouble(),
-      unit: json['unit'],
+      id: json['id']?.toString() ?? DateTime.now().toString(),
+      name: json['name']?.toString() ?? 'Tanpa Nama',
+      supplier: json['supplier']?.toString() ?? '-',
+      totalCost: safeDouble(json['totalCost']), // Pakai safeDouble
+      quantity: safeDouble(json['quantity']),     // Pakai safeDouble
+      unit: json['unit']?.toString() ?? 'pcs',
     );
   }
 }
@@ -76,9 +83,13 @@ class UsedMaterial {
   };
 
   factory UsedMaterial.fromJson(Map<String, dynamic> json) {
+    // Cek jika material null (data korup), buat dummy biar gak crash
+    var matData = json['material'] != null ? MaterialItem.fromJson(json['material']) 
+                  : MaterialItem(id: '0', name: 'Unknown', supplier: '-', totalCost: 0, quantity: 1, unit: 'pcs');
+    
     return UsedMaterial(
-      material: MaterialItem.fromJson(json['material']),
-      usedQty: (json['usedQty'] as num).toDouble(),
+      material: matData,
+      usedQty: safeDouble(json['usedQty']),
     );
   }
 }
@@ -113,18 +124,18 @@ class SavedRecipe {
   };
 
   factory SavedRecipe.fromJson(Map<String, dynamic> json) {
+    var matList = json['materials'] as List? ?? []; // Handle null list
     return SavedRecipe(
-      id: json['id'] ?? DateTime.now().toString(),
-      name: json['name'],
-      materials: (json['materials'] as List).map((e) => UsedMaterial.fromJson(e)).toList(),
-      laborCost: (json['laborCost'] as num).toDouble(),
-      packagingCost: (json['packagingCost'] as num).toDouble(),
-      shippingCost: (json['shippingCost'] as num).toDouble(),
-      markupPercent: (json['markupPercent'] as num).toDouble(),
+      id: json['id']?.toString() ?? DateTime.now().toString(),
+      name: json['name']?.toString() ?? 'Resep Tanpa Nama',
+      materials: matList.map((e) => UsedMaterial.fromJson(e)).toList(),
+      laborCost: safeDouble(json['laborCost']),
+      packagingCost: safeDouble(json['packagingCost']),
+      shippingCost: safeDouble(json['shippingCost']),
+      markupPercent: safeDouble(json['markupPercent']),
     );
   }
 }
-
 // ================== 2. LOGIC PROVIDER (DATABASE) ==================
 
 class AppProvider with ChangeNotifier {
