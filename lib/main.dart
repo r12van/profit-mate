@@ -1,27 +1,33 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Kita inisialisasi Provider dengan data yang dimuat dari memori
+  final prefs = await SharedPreferences.getInstance();
+  
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => AppProvider()),
+        ChangeNotifierProvider(create: (_) => AppProvider(prefs)),
       ],
       child: const ProfitMateApp(),
     ),
   );
 }
 
-// ================== 1. MODEL DATA (Sesuai Excel) ==================
+// ================== 1. MODEL DATA (SERIALIZABLE) ==================
 
 class MaterialItem {
   String id;
   String name;
   String supplier;
   double totalCost;
-  double quantity; // Jumlah beli (misal 1000 gram)
-  String unit; // Satuan (misal gram, pcs, ml)
+  double quantity;
+  String unit;
 
   MaterialItem({
     required this.id,
@@ -32,8 +38,29 @@ class MaterialItem {
     required this.unit,
   });
 
-  // Menghitung Harga Per Satuan (Rumus Excel: Total Cost / Qty)
   double get pricePerUnit => (quantity > 0) ? totalCost / quantity : 0.0;
+
+  // Mengubah Object ke JSON (untuk disimpan)
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'supplier': supplier,
+    'totalCost': totalCost,
+    'quantity': quantity,
+    'unit': unit,
+  };
+
+  // Mengubah JSON ke Object (untuk diload)
+  factory MaterialItem.fromJson(Map<String, dynamic> json) {
+    return MaterialItem(
+      id: json['id'],
+      name: json['name'],
+      supplier: json['supplier'],
+      totalCost: (json['totalCost'] as num).toDouble(),
+      quantity: (json['quantity'] as num).toDouble(),
+      unit: json['unit'],
+    );
+  }
 }
 
 class UsedMaterial {
@@ -41,45 +68,143 @@ class UsedMaterial {
   double usedQty;
 
   UsedMaterial({required this.material, required this.usedQty});
-
-  // Biaya pemakaian = Harga Satuan x Jumlah Pakai
   double get cost => material.pricePerUnit * usedQty;
+
+  Map<String, dynamic> toJson() => {
+    'material': material.toJson(),
+    'usedQty': usedQty,
+  };
+
+  factory UsedMaterial.fromJson(Map<String, dynamic> json) {
+    return UsedMaterial(
+      material: MaterialItem.fromJson(json['material']),
+      usedQty: (json['usedQty'] as num).toDouble(),
+    );
+  }
 }
 
-// ================== 2. LOGIC PROVIDER (Otak Aplikasi) ==================
+class SavedRecipe {
+  String id;
+  String name;
+  List<UsedMaterial> materials;
+  double laborCost;
+  double packagingCost;
+  double shippingCost;
+  double markupPercent;
+
+  SavedRecipe({
+    required this.id,
+    required this.name,
+    required this.materials,
+    required this.laborCost,
+    required this.packagingCost,
+    required this.shippingCost,
+    required this.markupPercent,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'materials': materials.map((e) => e.toJson()).toList(),
+    'laborCost': laborCost,
+    'packagingCost': packagingCost,
+    'shippingCost': shippingCost,
+    'markupPercent': markupPercent,
+  };
+
+  factory SavedRecipe.fromJson(Map<String, dynamic> json) {
+    return SavedRecipe(
+      id: json['id'] ?? DateTime.now().toString(),
+      name: json['name'],
+      materials: (json['materials'] as List).map((e) => UsedMaterial.fromJson(e)).toList(),
+      laborCost: (json['laborCost'] as num).toDouble(),
+      packagingCost: (json['packagingCost'] as num).toDouble(),
+      shippingCost: (json['shippingCost'] as num).toDouble(),
+      markupPercent: (json['markupPercent'] as num).toDouble(),
+    );
+  }
+}
+
+// ================== 2. LOGIC PROVIDER (DATABASE) ==================
 
 class AppProvider with ChangeNotifier {
-  // Database Bahan (In-Memory untuk Prototype)
-  final List<MaterialItem> _materials = [
-    MaterialItem(id: 'KN-1911', name: 'Beans Kopi', supplier: 'Rostery', totalCost: 150000, quantity: 1000, unit: 'gram'),
-    MaterialItem(id: 'KT-8091', name: 'Susu Greenfield', supplier: 'Minimarket', totalCost: 25000, quantity: 1000, unit: 'ml'),
-    MaterialItem(id: 'BW-1912', name: 'Cup Hot Kopi', supplier: 'Plastik Class', totalCost: 800, quantity: 1, unit: 'pcs'),
-    MaterialItem(id: 'GL-001', name: 'Gula Aren', supplier: 'Pasar', totalCost: 15000, quantity: 500, unit: 'ml'),
-  ];
+  final SharedPreferences prefs;
+  
+  List<MaterialItem> _materials = [];
+  List<SavedRecipe> _savedRecipes = [];
 
-  List<MaterialItem> get materials => _materials;
-
-  // Variabel Kalkulator
-  final List<UsedMaterial> _currentRecipe = [];
+  // Variabel Kalkulator Aktif
+  List<UsedMaterial> _currentRecipe = [];
+  String _currentRecipeName = "Resep Baru";
   double _laborCost = 0;
   double _packagingCost = 0;
   double _shippingCost = 0;
-  double _markupPercent = 30; // Default 30%
-  double _taxPercent = 0;
+  double _markupPercent = 30;
 
+  AppProvider(this.prefs) {
+    _loadFromPrefs();
+  }
+
+  // Getters
+  List<MaterialItem> get materials => _materials;
+  List<SavedRecipe> get savedRecipes => _savedRecipes;
   List<UsedMaterial> get currentRecipe => _currentRecipe;
+  String get currentRecipeName => _currentRecipeName;
   double get laborCost => _laborCost;
   double get packagingCost => _packagingCost;
   double get shippingCost => _shippingCost;
   double get markupPercent => _markupPercent;
-  double get taxPercent => _taxPercent;
 
-  // --- Actions ---
+  // --- DATABASE LOGIC ---
+
+  void _loadFromPrefs() {
+    // Load Materials
+    String? matString = prefs.getString('materials');
+    if (matString != null) {
+      List<dynamic> jsonList = jsonDecode(matString);
+      _materials = jsonList.map((e) => MaterialItem.fromJson(e)).toList();
+    } else {
+      // Data Dummy Awal jika kosong
+      _materials = [
+        MaterialItem(id: '1', name: 'Kopi Beans', supplier: 'Petani', totalCost: 150000, quantity: 1000, unit: 'gram'),
+        MaterialItem(id: '2', name: 'Susu', supplier: 'Toko', totalCost: 24000, quantity: 1000, unit: 'ml'),
+      ];
+    }
+
+    // Load Recipes
+    String? recString = prefs.getString('recipes');
+    if (recString != null) {
+      List<dynamic> jsonList = jsonDecode(recString);
+      _savedRecipes = jsonList.map((e) => SavedRecipe.fromJson(e)).toList();
+    }
+    notifyListeners();
+  }
+
+  void _saveMaterialsToPrefs() {
+    String jsonString = jsonEncode(_materials.map((e) => e.toJson()).toList());
+    prefs.setString('materials', jsonString);
+  }
+
+  void _saveRecipesToPrefs() {
+    String jsonString = jsonEncode(_savedRecipes.map((e) => e.toJson()).toList());
+    prefs.setString('recipes', jsonString);
+  }
+
+  // --- ACTIONS ---
 
   void addMaterial(MaterialItem item) {
     _materials.add(item);
+    _saveMaterialsToPrefs();
     notifyListeners();
   }
+
+  void deleteMaterial(int index) {
+    _materials.removeAt(index);
+    _saveMaterialsToPrefs();
+    notifyListeners();
+  }
+
+  // --- Calculator Logic ---
 
   void addToRecipe(MaterialItem item, double qty) {
     _currentRecipe.add(UsedMaterial(material: item, usedQty: qty));
@@ -91,41 +216,67 @@ class AppProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  void updateCosts({double? labor, double? pack, double? ship, double? markup, double? tax}) {
+  void updateCosts({double? labor, double? pack, double? ship, double? markup, String? name}) {
     if (labor != null) _laborCost = labor;
     if (pack != null) _packagingCost = pack;
     if (ship != null) _shippingCost = ship;
     if (markup != null) _markupPercent = markup;
-    if (tax != null) _taxPercent = tax;
+    if (name != null) _currentRecipeName = name;
     notifyListeners();
   }
 
   void resetCalculator() {
     _currentRecipe.clear();
+    _currentRecipeName = "Resep Baru";
     _laborCost = 0;
     _packagingCost = 0;
     _shippingCost = 0;
     notifyListeners();
   }
 
-  // --- Perhitungan Akhir (Sesuai Rumus Excel) ---
+  void loadRecipeToCalculator(SavedRecipe recipe) {
+    _currentRecipe = List.from(recipe.materials); // Copy list
+    _currentRecipeName = recipe.name;
+    _laborCost = recipe.laborCost;
+    _packagingCost = recipe.packagingCost;
+    _shippingCost = recipe.shippingCost;
+    _markupPercent = recipe.markupPercent;
+    notifyListeners();
+  }
 
+  void saveCurrentRecipe() {
+    if (_currentRecipe.isEmpty) return;
+
+    final newRecipe = SavedRecipe(
+      id: DateTime.now().toString(),
+      name: _currentRecipeName,
+      materials: List.from(_currentRecipe),
+      laborCost: _laborCost,
+      packagingCost: _packagingCost,
+      shippingCost: _shippingCost,
+      markupPercent: _markupPercent,
+    );
+
+    // Cek apakah update atau baru (logic sederhana: selalu tambah baru utk sekarang)
+    _savedRecipes.add(newRecipe);
+    _saveRecipesToPrefs();
+    notifyListeners();
+  }
+
+  void deleteSavedRecipe(int index) {
+    _savedRecipes.removeAt(index);
+    _saveRecipesToPrefs();
+    notifyListeners();
+  }
+
+  // --- Perhitungan ---
   double get totalMaterialCost => _currentRecipe.fold(0, (sum, item) => sum + item.cost);
-  
-  // Total Base Cost (HPP)
   double get totalBaseCost => totalMaterialCost + _laborCost + _packagingCost + _shippingCost;
-
-  // Harga Sebelum Pajak (Base Cost + Markup)
   double get preTaxPrice => totalBaseCost * (1 + (_markupPercent / 100));
-
-  // Profit (Uang)
   double get profitAmount => preTaxPrice - totalBaseCost;
-
-  // Harga Final (Termasuk Pajak)
-  double get finalPrice => preTaxPrice * (1 + (_taxPercent / 100));
 }
 
-// ================== 3. USER INTERFACE (UI) ==================
+// ================== 3. UI ==================
 
 class ProfitMateApp extends StatelessWidget {
   const ProfitMateApp({super.key});
@@ -134,11 +285,7 @@ class ProfitMateApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Profit Mate',
-      theme: ThemeData(
-        primarySwatch: Colors.teal,
-        useMaterial3: true,
-        scaffoldBackgroundColor: Colors.grey[100],
-      ),
+      theme: ThemeData(primarySwatch: Colors.teal, useMaterial3: true, scaffoldBackgroundColor: Colors.grey[100]),
       home: const MainNavigation(),
     );
   }
@@ -152,10 +299,7 @@ class MainNavigation extends StatefulWidget {
 
 class _MainNavigationState extends State<MainNavigation> {
   int _currentIndex = 0;
-  final List<Widget> _pages = [
-    const CalculatorScreen(),
-    const MaterialListScreen(),
-  ];
+  final List<Widget> _pages = [const CalculatorScreen(), const RecipeBookScreen(), const MaterialListScreen()];
 
   @override
   Widget build(BuildContext context) {
@@ -165,35 +309,32 @@ class _MainNavigationState extends State<MainNavigation> {
         selectedIndex: _currentIndex,
         onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.calculate), label: 'Kalkulator Harga'),
-          NavigationDestination(icon: Icon(Icons.inventory_2), label: 'Data Bahan'),
+          NavigationDestination(icon: Icon(Icons.calculate), label: 'Kalkulator'),
+          NavigationDestination(icon: Icon(Icons.book), label: 'Buku Resep'),
+          NavigationDestination(icon: Icon(Icons.inventory_2), label: 'Stok Bahan'),
         ],
       ),
     );
   }
 }
 
-// --- SCREEN 1: KALKULATOR HARGA ---
+// --- SCREEN 1: KALKULATOR ---
 
 class CalculatorScreen extends StatelessWidget {
   const CalculatorScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    // Kita gunakan Consumer di root build agar update state lebih aman
     return Consumer<AppProvider>(
-      builder: (context, provider, child) {
+      builder: (context, provider, _) {
         final currency = NumberFormat.currency(locale: 'id_ID', symbol: 'Rp ', decimalDigits: 0);
 
         return Scaffold(
           appBar: AppBar(
-            title: const Text('Kalkulator Harga Jual'),
+            title: const Text('Kalkulator'),
             actions: [
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                onPressed: () => provider.resetCalculator(),
-                tooltip: "Reset",
-              )
+              IconButton(icon: const Icon(Icons.cleaning_services), onPressed: () => provider.resetCalculator(), tooltip: "Bersihkan"),
+              IconButton(icon: const Icon(Icons.save), onPressed: () => _showSaveDialog(context, provider), tooltip: "Simpan Resep"),
             ],
           ),
           body: SingleChildScrollView(
@@ -201,108 +342,61 @@ class CalculatorScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Section 1: Bahan Baku
-                _buildSectionTitle("1. Komposisi Bahan (Recipe)"),
-                Card(
-                  elevation: 2,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12.0),
-                    child: Column(
-                      children: [
-                        if (provider.currentRecipe.isEmpty)
-                          const Padding(
-                            padding: EdgeInsets.all(8.0),
-                            child: Text("Belum ada bahan. Klik tombol di bawah.", style: TextStyle(color: Colors.grey)),
-                          ),
-                        ...provider.currentRecipe.asMap().entries.map((entry) {
-                          int idx = entry.key;
-                          UsedMaterial item = entry.value;
-                          return ListTile(
-                            title: Text(item.material.name),
-                            subtitle: Text("${item.usedQty} ${item.material.unit} x ${currency.format(item.material.pricePerUnit)}"),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(currency.format(item.cost), style: const TextStyle(fontWeight: FontWeight.bold)),
-                                IconButton(
-                                  icon: const Icon(Icons.delete, color: Colors.red, size: 20),
-                                  onPressed: () => provider.removeRecipeItem(idx),
-                                )
-                              ],
-                            ),
-                          );
-                        }).toList(),
-                        const Divider(),
-                        ElevatedButton.icon(
-                          onPressed: () => _showAddMaterialDialog(context),
-                          icon: const Icon(Icons.add),
-                          label: const Text("Tambah Bahan dari Stok"),
-                        ),
-                      ],
-                    ),
-                  ),
+                TextField(
+                  controller: TextEditingController(text: provider.currentRecipeName),
+                  decoration: const InputDecoration(labelText: "Nama Produk / Resep", prefixIcon: Icon(Icons.label)),
+                  onChanged: (val) => provider.updateCosts(name: val),
                 ),
-                
-                const SizedBox(height: 20),
-                
-                // Section 2: Biaya Lain & Markup
-                _buildSectionTitle("2. Biaya Operasional & Target"),
+                const SizedBox(height: 15),
+                // Section 1: Bahan
+                const Text("1. Komposisi", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.teal)),
                 Card(
-                  elevation: 2,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      children: [
-                        _buildNumberInput("Biaya Tenaga Kerja (Labor)", provider.laborCost, (val) => provider.updateCosts(labor: val)),
-                        _buildNumberInput("Biaya Kemasan (Packaging)", provider.packagingCost, (val) => provider.updateCosts(pack: val)),
-                        _buildNumberInput("Biaya Lain (Shipping/Listrik)", provider.shippingCost, (val) => provider.updateCosts(ship: val)),
-                        const Divider(height: 24),
-                        Row(
-                          children: [
-                            const Expanded(child: Text("Markup Keuntungan (%)", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
-                            SizedBox(
-                              width: 80,
-                              child: TextFormField(
-                                initialValue: provider.markupPercent.toString(), // Fix: Pakai initialValue dari provider
-                                keyboardType: TextInputType.number,
-                                decoration: const InputDecoration(suffixText: "%"),
-                                onChanged: (val) => provider.updateCosts(markup: double.tryParse(val) ?? 0),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 20),
-
-                // Section 3: HASIL PERHITUNGAN
-                _buildSectionTitle("3. Hasil Perhitungan"),
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(colors: [Colors.teal.shade700, Colors.teal.shade400]),
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [BoxShadow(blurRadius: 10, color: Colors.teal.withOpacity(0.3))]
-                  ),
                   child: Column(
                     children: [
-                      _buildResultRow("Total Base Cost (HPP)", provider.totalBaseCost, currency, isWhite: true),
-                      _buildResultRow("Potensi Profit", provider.profitAmount, currency, isWhite: true),
-                      const Divider(color: Colors.white54),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text("HARGA JUAL REKOMENDASI", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                          Text(currency.format(provider.preTaxPrice), style: const TextStyle(color: Colors.yellowAccent, fontSize: 18, fontWeight: FontWeight.bold)),
-                        ],
-                      ),
+                       if (provider.currentRecipe.isEmpty) const Padding(padding: EdgeInsets.all(10), child: Text("Belum ada bahan")),
+                       ...provider.currentRecipe.asMap().entries.map((e) => ListTile(
+                         title: Text(e.value.material.name),
+                         subtitle: Text("${e.value.usedQty} ${e.value.material.unit}"),
+                         trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: ()=>provider.removeRecipeItem(e.key)),
+                       )).toList(),
+                       ElevatedButton.icon(onPressed: ()=> _showAddMaterialDialog(context), icon: const Icon(Icons.add), label: const Text("Tambah Bahan")),
+                       const SizedBox(height: 10),
                     ],
                   ),
                 ),
-                const SizedBox(height: 30),
+                const SizedBox(height: 15),
+                // Section 2: Biaya
+                const Text("2. Biaya & Margin", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.teal)),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Column(
+                      children: [
+                        _inputCost("Tenaga Kerja", provider.laborCost, (v)=>provider.updateCosts(labor: v)),
+                        _inputCost("Kemasan", provider.packagingCost, (v)=>provider.updateCosts(pack: v)),
+                        _inputCost("Lain-lain", provider.shippingCost, (v)=>provider.updateCosts(ship: v)),
+                        Row(children: [
+                          const Expanded(child: Text("Markup (%)", style: TextStyle(fontWeight: FontWeight.bold))),
+                          SizedBox(width: 80, child: TextFormField(initialValue: provider.markupPercent.toString(), keyboardType: TextInputType.number, onChanged: (v)=>provider.updateCosts(markup: double.tryParse(v)??0))),
+                        ])
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                // Result
+                Container(
+                  padding: const EdgeInsets.all(15),
+                  decoration: BoxDecoration(color: Colors.teal, borderRadius: BorderRadius.circular(10)),
+                  child: Column(
+                    children: [
+                      _rowResult("HPP (Modal)", provider.totalBaseCost, currency),
+                      _rowResult("Profit", provider.profitAmount, currency),
+                      const Divider(color: Colors.white),
+                      _rowResult("HARGA JUAL", provider.preTaxPrice, currency, isBig: true),
+                    ],
+                  ),
+                )
               ],
             ),
           ),
@@ -311,127 +405,82 @@ class CalculatorScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildSectionTitle(String title) {
+  Widget _inputCost(String label, double val, Function(double) onChg) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8.0, left: 4),
-      child: Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.teal)),
-    );
-  }
-
-  Widget _buildNumberInput(String label, double currentVal, Function(double) onChanged) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      padding: const EdgeInsets.only(bottom: 5),
       child: TextFormField(
-        initialValue: currentVal == 0 ? '' : currentVal.toString(),
+        initialValue: val == 0 ? '' : val.toString(),
         keyboardType: TextInputType.number,
-        decoration: InputDecoration(
-          labelText: label,
-          border: const OutlineInputBorder(),
-          prefixText: "Rp ",
-          isDense: true,
-        ),
-        onChanged: (val) => onChanged(double.tryParse(val) ?? 0),
+        decoration: InputDecoration(labelText: label, prefixText: "Rp ", isDense: true),
+        onChanged: (v) => onChg(double.tryParse(v) ?? 0),
       ),
     );
   }
 
-  Widget _buildResultRow(String label, double value, NumberFormat fmt, {bool isWhite = false}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(label, style: TextStyle(color: isWhite ? Colors.white70 : Colors.black87)),
-          Text(fmt.format(value), style: TextStyle(color: isWhite ? Colors.white : Colors.black, fontWeight: FontWeight.bold)),
-        ],
-      ),
-    );
+  Widget _rowResult(String label, double val, NumberFormat fmt, {bool isBig = false}) {
+    return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Text(label, style: TextStyle(color: Colors.white, fontSize: isBig ? 18 : 14)),
+      Text(fmt.format(val), style: TextStyle(color: isBig ? Colors.yellow : Colors.white, fontWeight: FontWeight.bold, fontSize: isBig ? 20 : 14)),
+    ]);
   }
 
   void _showAddMaterialDialog(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      builder: (ctx) { // ctx adalah context milik BottomSheet
-        return Consumer<AppProvider>(
-          builder: (context, provider, _) {
-            return Container(
-               padding: const EdgeInsets.all(10),
-               child: Column(
-                 mainAxisSize: MainAxisSize.min,
-                 children: [
-                   const Padding(
-                     padding: EdgeInsets.all(8.0),
-                     child: Text("Pilih Bahan Baku", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                   ),
-                   Expanded(
-                     child: ListView.builder(
-                      itemCount: provider.materials.length,
-                      itemBuilder: (context, i) {
-                        final item = provider.materials[i];
-                        return ListTile(
-                          title: Text(item.name),
-                          subtitle: Text("Stok: ${item.quantity} ${item.unit}"),
-                          trailing: const Icon(Icons.add_circle_outline, color: Colors.teal),
-                          onTap: () {
-                            // FIX: Tutup bottom sheet dulu
-                            Navigator.pop(ctx); 
-                            // Lalu panggil dialog berikutnya dengan context 'context' (parent) yang aman
-                            // Gunakan Future.delayed agar transisi UI selesai dulu
-                            Future.delayed(const Duration(milliseconds: 100), () {
-                               if (context.mounted) {
-                                 _showQtyDialog(context, item);
-                               }
-                            });
-                          },
-                        );
-                      },
-                                     ),
-                   ),
-                 ],
-               ),
-            );
-          },
+    showModalBottomSheet(context: context, builder: (ctx) {
+      return Consumer<AppProvider>(builder: (context, prov, _) {
+        return ListView.builder(
+          itemCount: prov.materials.length,
+          itemBuilder: (c, i) => ListTile(
+            title: Text(prov.materials[i].name),
+            trailing: const Icon(Icons.add),
+            onTap: () {
+              Navigator.pop(ctx);
+              _inputQty(context, prov.materials[i]);
+            },
+          ),
         );
-      },
-    );
+      });
+    });
   }
 
-  void _showQtyDialog(BuildContext parentContext, MaterialItem item) {
-    final qtyController = TextEditingController();
-    showDialog(
-      context: parentContext,
-      builder: (dialogCtx) => AlertDialog( // dialogCtx adalah context milik Dialog
-        title: Text("Pakai ${item.name}"),
-        content: TextField(
-          controller: qtyController,
-          autofocus: true,
-          keyboardType: TextInputType.number,
-          decoration: InputDecoration(labelText: "Jumlah pemakaian (${item.unit})"),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogCtx), child: const Text("Batal")),
-          ElevatedButton(
-            onPressed: () {
-              double qty = double.tryParse(qtyController.text) ?? 0;
-              if (qty > 0) {
-                // FIX: Gunakan dialogCtx (context lokal) untuk mencari Provider
-                // Karena dialogCtx adalah anak dari MaterialApp -> Provider
-                Provider.of<AppProvider>(dialogCtx, listen: false).addToRecipe(item, qty);
-              }
-              Navigator.pop(dialogCtx);
-            },
-            child: const Text("Tambahkan"),
-          )
-        ],
-      ),
-    );
+  void _inputQty(BuildContext context, MaterialItem item) {
+    final qtyCtrl = TextEditingController();
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      title: Text("Pakai ${item.name}"),
+      content: TextField(controller: qtyCtrl, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: "Jumlah (${item.unit})"), autofocus: true),
+      actions: [
+        ElevatedButton(onPressed: () {
+          double q = double.tryParse(qtyCtrl.text) ?? 0;
+          if (q > 0) Provider.of<AppProvider>(context, listen: false).addToRecipe(item, q);
+          Navigator.pop(ctx);
+        }, child: const Text("OK"))
+      ],
+    ));
+  }
+
+  void _showSaveDialog(BuildContext context, AppProvider prov) {
+    if (prov.currentRecipe.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Bahan masih kosong!")));
+      return;
+    }
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      title: const Text("Simpan Resep Ini?"),
+      content: Text("Akan disimpan sebagai '${prov.currentRecipeName}'"),
+      actions: [
+        TextButton(onPressed: ()=>Navigator.pop(ctx), child: const Text("Batal")),
+        ElevatedButton(onPressed: (){
+          prov.saveCurrentRecipe();
+          Navigator.pop(ctx);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Resep Tersimpan!")));
+        }, child: const Text("Simpan"))
+      ],
+    ));
   }
 }
 
-// --- SCREEN 2: DATA BAHAN (INVENTORY) ---
+// --- SCREEN 2: BUKU RESEP (DATABASE) ---
 
-class MaterialListScreen extends StatelessWidget {
-  const MaterialListScreen({super.key});
+class RecipeBookScreen extends StatelessWidget {
+  const RecipeBookScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -439,86 +488,100 @@ class MaterialListScreen extends StatelessWidget {
     final currency = NumberFormat.currency(locale: 'id_ID', symbol: 'Rp ', decimalDigits: 0);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Database Bahan Baku')),
+      appBar: AppBar(title: const Text("Buku Resep Tersimpan")),
+      body: provider.savedRecipes.isEmpty 
+        ? const Center(child: Text("Belum ada resep disimpan"))
+        : ListView.builder(
+            itemCount: provider.savedRecipes.length,
+            itemBuilder: (ctx, i) {
+              final recipe = provider.savedRecipes[i];
+              // Hitung total on the fly
+              double matCost = recipe.materials.fold(0, (sum, item) => sum + (item.cost));
+              double totalHpp = matCost + recipe.laborCost + recipe.packagingCost + recipe.shippingCost;
+              double sellPrice = totalHpp * (1 + recipe.markupPercent / 100);
+
+              return Card(
+                margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                child: ListTile(
+                  title: Text(recipe.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text("HPP: ${currency.format(totalHpp)} | Jual: ${currency.format(sellPrice)}"),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.upload_file, color: Colors.blue),
+                        onPressed: () {
+                           provider.loadRecipeToCalculator(recipe);
+                           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Resep '${recipe.name}' dimuat ke kalkulator!")));
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete, color: Colors.red),
+                        onPressed: () => provider.deleteSavedRecipe(i),
+                      )
+                    ],
+                  ),
+                ),
+              );
+            },
+        ),
+    );
+  }
+}
+
+// --- SCREEN 3: DATA BAHAN ---
+
+class MaterialListScreen extends StatelessWidget {
+  const MaterialListScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = Provider.of<AppProvider>(context);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Stok Bahan Baku')),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => _showAddMaterialForm(context),
         child: const Icon(Icons.add),
+        onPressed: () => _addMaterial(context),
       ),
       body: ListView.builder(
         itemCount: provider.materials.length,
         itemBuilder: (ctx, i) {
           final item = provider.materials[i];
-          return Card(
-            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            child: ListTile(
-              leading: CircleAvatar(child: Text(item.name[0])),
-              title: Text(item.name),
-              subtitle: Text("Supplier: ${item.supplier}\nBeli: ${currency.format(item.totalCost)} / ${item.quantity} ${item.unit}"),
-              trailing: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  const Text("Harga Satuan", style: TextStyle(fontSize: 10)),
-                  Text(
-                    "${currency.format(item.pricePerUnit)}/${item.unit}",
-                    style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.teal),
-                  ),
-                ],
-              ),
-            ),
+          return ListTile(
+            leading: CircleAvatar(child: Text(item.name[0])),
+            title: Text(item.name),
+            subtitle: Text("Rp ${item.totalCost} / ${item.quantity} ${item.unit}"),
+            trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.grey), onPressed: ()=> provider.deleteMaterial(i)),
           );
         },
       ),
     );
   }
 
-  void _showAddMaterialForm(BuildContext context) {
-    final nameCtrl = TextEditingController();
-    final costCtrl = TextEditingController();
-    final qtyCtrl = TextEditingController();
-    final unitCtrl = TextEditingController(text: "gram"); // default
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Tambah Material Baru"),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: "Nama Bahan")),
-              TextField(controller: costCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Total Harga Beli (Rp)")),
-              Row(
-                children: [
-                  Expanded(child: TextField(controller: qtyCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Qty Beli"))),
-                  const SizedBox(width: 10),
-                  Expanded(child: TextField(controller: unitCtrl, decoration: const InputDecoration(labelText: "Satuan (kg/pcs)"))),
-                ],
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Batal")),
-          ElevatedButton(
-            onPressed: () {
-              if (nameCtrl.text.isNotEmpty && costCtrl.text.isNotEmpty) {
-                final newItem = MaterialItem(
-                  id: DateTime.now().toString(),
-                  name: nameCtrl.text,
-                  supplier: "-",
-                  totalCost: double.tryParse(costCtrl.text) ?? 0,
-                  quantity: double.tryParse(qtyCtrl.text) ?? 1,
-                  unit: unitCtrl.text,
-                );
-                Provider.of<AppProvider>(context, listen: false).addMaterial(newItem);
-                Navigator.pop(ctx);
-              }
-            },
-            child: const Text("Simpan"),
-          )
-        ],
-      ),
-    );
+  void _addMaterial(BuildContext context) {
+    final n = TextEditingController(), c = TextEditingController(), q = TextEditingController(), u = TextEditingController(text: 'gram');
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      title: const Text("Tambah Bahan"),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: n, decoration: const InputDecoration(labelText: "Nama")),
+        TextField(controller: c, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Harga Beli Total")),
+        Row(children: [
+          Expanded(child: TextField(controller: q, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Qty"))),
+          const SizedBox(width: 10),
+          Expanded(child: TextField(controller: u, decoration: const InputDecoration(labelText: "Satuan"))),
+        ]),
+      ]),
+      actions: [
+        ElevatedButton(onPressed: (){
+          if(n.text.isNotEmpty) {
+            Provider.of<AppProvider>(context, listen: false).addMaterial(MaterialItem(
+              id: DateTime.now().toString(), name: n.text, supplier: '', 
+              totalCost: double.tryParse(c.text)??0, quantity: double.tryParse(q.text)??1, unit: u.text
+            ));
+            Navigator.pop(ctx);
+          }
+        }, child: const Text("Simpan"))
+      ],
+    ));
   }
 }
