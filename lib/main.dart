@@ -6,9 +6,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Kita inisialisasi Provider dengan data yang dimuat dari memori
-  final prefs = await SharedPreferences.getInstance();
   
+  // Inisialisasi Prefs dengan Error Handling
+  SharedPreferences? prefs;
+  try {
+    prefs = await SharedPreferences.getInstance();
+  } catch (e) {
+    // Jika gagal init prefs (jarang terjadi), aplikasi tetap jalan
+    debugPrint("Error init prefs: $e");
+  }
+
   runApp(
     MultiProvider(
       providers: [
@@ -19,9 +26,9 @@ void main() async {
   );
 }
 
-// ================== 1. MODEL DATA (ANTI-CRASH VERSION) ==================
+// ================== 1. MODEL DATA (SUPER SAFE VERSION) ==================
 
-// Helper agar tidak error saat convert angka
+// Fungsi helper super aman untuk konversi angka
 double safeDouble(dynamic value) {
   if (value == null) return 0.0;
   if (value is int) return value.toDouble();
@@ -58,13 +65,15 @@ class MaterialItem {
     'unit': unit,
   };
 
-  factory MaterialItem.fromJson(Map<String, dynamic> json) {
+  factory MaterialItem.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return MaterialItem(id: '0', name: 'Error', supplier: '-', totalCost: 0, quantity: 1, unit: 'pcs');
+    
     return MaterialItem(
       id: json['id']?.toString() ?? DateTime.now().toString(),
       name: json['name']?.toString() ?? 'Tanpa Nama',
       supplier: json['supplier']?.toString() ?? '-',
-      totalCost: safeDouble(json['totalCost']), // Pakai safeDouble
-      quantity: safeDouble(json['quantity']),     // Pakai safeDouble
+      totalCost: safeDouble(json['totalCost']),
+      quantity: safeDouble(json['quantity']),
       unit: json['unit']?.toString() ?? 'pcs',
     );
   }
@@ -82,13 +91,15 @@ class UsedMaterial {
     'usedQty': usedQty,
   };
 
-  factory UsedMaterial.fromJson(Map<String, dynamic> json) {
-    // Cek jika material null (data korup), buat dummy biar gak crash
-    var matData = json['material'] != null ? MaterialItem.fromJson(json['material']) 
-                  : MaterialItem(id: '0', name: 'Unknown', supplier: '-', totalCost: 0, quantity: 1, unit: 'pcs');
-    
+  factory UsedMaterial.fromJson(Map<String, dynamic>? json) {
+    if (json == null) {
+      return UsedMaterial(
+        material: MaterialItem(id: '0', name: 'Unknown', supplier: '-', totalCost: 0, quantity: 1, unit: 'pcs'),
+        usedQty: 0
+      );
+    }
     return UsedMaterial(
-      material: matData,
+      material: MaterialItem.fromJson(json['material']),
       usedQty: safeDouble(json['usedQty']),
     );
   }
@@ -123,8 +134,10 @@ class SavedRecipe {
     'markupPercent': markupPercent,
   };
 
-  factory SavedRecipe.fromJson(Map<String, dynamic> json) {
-    var matList = json['materials'] as List? ?? []; // Handle null list
+  factory SavedRecipe.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return SavedRecipe(id: '0', name: 'Error', materials: [], laborCost: 0, packagingCost: 0, shippingCost: 0, markupPercent: 0);
+    
+    var matList = json['materials'] as List? ?? [];
     return SavedRecipe(
       id: json['id']?.toString() ?? DateTime.now().toString(),
       name: json['name']?.toString() ?? 'Resep Tanpa Nama',
@@ -136,15 +149,15 @@ class SavedRecipe {
     );
   }
 }
-// ================== 2. LOGIC PROVIDER (DATABASE) ==================
+
+// ================== 2. LOGIC PROVIDER (DENGAN SAFEGUARD) ==================
 
 class AppProvider with ChangeNotifier {
-  final SharedPreferences prefs;
+  final SharedPreferences? prefs; // Bisa null
   
   List<MaterialItem> _materials = [];
   List<SavedRecipe> _savedRecipes = [];
 
-  // Variabel Kalkulator Aktif
   List<UsedMaterial> _currentRecipe = [];
   String _currentRecipeName = "Resep Baru";
   double _laborCost = 0;
@@ -156,7 +169,6 @@ class AppProvider with ChangeNotifier {
     _loadFromPrefs();
   }
 
-  // Getters
   List<MaterialItem> get materials => _materials;
   List<SavedRecipe> get savedRecipes => _savedRecipes;
   List<UsedMaterial> get currentRecipe => _currentRecipe;
@@ -166,39 +178,67 @@ class AppProvider with ChangeNotifier {
   double get shippingCost => _shippingCost;
   double get markupPercent => _markupPercent;
 
-  // --- DATABASE LOGIC ---
-
+  // --- SAFE LOADING LOGIC ---
   void _loadFromPrefs() {
-    // Load Materials
-    String? matString = prefs.getString('materials');
-    if (matString != null) {
-      List<dynamic> jsonList = jsonDecode(matString);
-      _materials = jsonList.map((e) => MaterialItem.fromJson(e)).toList();
-    } else {
-      // Data Dummy Awal jika kosong
-      _materials = [
-        MaterialItem(id: '1', name: 'Kopi Beans', supplier: 'Petani', totalCost: 150000, quantity: 1000, unit: 'gram'),
-        MaterialItem(id: '2', name: 'Susu', supplier: 'Toko', totalCost: 24000, quantity: 1000, unit: 'ml'),
-      ];
+    if (prefs == null) return;
+
+    // 1. Load Materials dengan Try-Catch
+    try {
+      String? matString = prefs!.getString('materials');
+      if (matString != null && matString.isNotEmpty) {
+        List<dynamic> jsonList = jsonDecode(matString);
+        _materials = jsonList.map((e) => MaterialItem.fromJson(e)).toList();
+      } else {
+        _initDummyData();
+      }
+    } catch (e) {
+      debugPrint("Data Material Rusak: $e");
+      // JIKA RUSAK, HAPUS DAN RESET
+      prefs!.remove('materials');
+      _initDummyData();
     }
 
-    // Load Recipes
-    String? recString = prefs.getString('recipes');
-    if (recString != null) {
-      List<dynamic> jsonList = jsonDecode(recString);
-      _savedRecipes = jsonList.map((e) => SavedRecipe.fromJson(e)).toList();
+    // 2. Load Recipes dengan Try-Catch
+    try {
+      String? recString = prefs!.getString('recipes');
+      if (recString != null && recString.isNotEmpty) {
+        List<dynamic> jsonList = jsonDecode(recString);
+        _savedRecipes = jsonList.map((e) => SavedRecipe.fromJson(e)).toList();
+      }
+    } catch (e) {
+      debugPrint("Data Resep Rusak: $e");
+      prefs!.remove('recipes');
+      _savedRecipes = [];
     }
+    
     notifyListeners();
   }
 
+  void _initDummyData() {
+    _materials = [
+      MaterialItem(id: '1', name: 'Kopi Beans', supplier: 'Petani', totalCost: 150000, quantity: 1000, unit: 'gram'),
+      MaterialItem(id: '2', name: 'Susu', supplier: 'Toko', totalCost: 24000, quantity: 1000, unit: 'ml'),
+    ];
+  }
+
   void _saveMaterialsToPrefs() {
-    String jsonString = jsonEncode(_materials.map((e) => e.toJson()).toList());
-    prefs.setString('materials', jsonString);
+    if (prefs == null) return;
+    try {
+      String jsonString = jsonEncode(_materials.map((e) => e.toJson()).toList());
+      prefs!.setString('materials', jsonString);
+    } catch (e) {
+      debugPrint("Gagal simpan material: $e");
+    }
   }
 
   void _saveRecipesToPrefs() {
-    String jsonString = jsonEncode(_savedRecipes.map((e) => e.toJson()).toList());
-    prefs.setString('recipes', jsonString);
+    if (prefs == null) return;
+    try {
+      String jsonString = jsonEncode(_savedRecipes.map((e) => e.toJson()).toList());
+      prefs!.setString('recipes', jsonString);
+    } catch (e) {
+      debugPrint("Gagal simpan resep: $e");
+    }
   }
 
   // --- ACTIONS ---
@@ -210,12 +250,12 @@ class AppProvider with ChangeNotifier {
   }
 
   void deleteMaterial(int index) {
-    _materials.removeAt(index);
-    _saveMaterialsToPrefs();
-    notifyListeners();
+    if (index >= 0 && index < _materials.length) {
+      _materials.removeAt(index);
+      _saveMaterialsToPrefs();
+      notifyListeners();
+    }
   }
-
-  // --- Calculator Logic ---
 
   void addToRecipe(MaterialItem item, double qty) {
     _currentRecipe.add(UsedMaterial(material: item, usedQty: qty));
@@ -223,8 +263,10 @@ class AppProvider with ChangeNotifier {
   }
 
   void removeRecipeItem(int index) {
-    _currentRecipe.removeAt(index);
-    notifyListeners();
+    if (index >= 0 && index < _currentRecipe.length) {
+      _currentRecipe.removeAt(index);
+      notifyListeners();
+    }
   }
 
   void updateCosts({double? labor, double? pack, double? ship, double? markup, String? name}) {
@@ -246,7 +288,12 @@ class AppProvider with ChangeNotifier {
   }
 
   void loadRecipeToCalculator(SavedRecipe recipe) {
-    _currentRecipe = List.from(recipe.materials); // Copy list
+    // Deep copy materials agar tidak referensi memori yang sama
+    _currentRecipe = recipe.materials.map((m) => UsedMaterial(
+      material: m.material, 
+      usedQty: m.usedQty
+    )).toList();
+    
     _currentRecipeName = recipe.name;
     _laborCost = recipe.laborCost;
     _packagingCost = recipe.packagingCost;
@@ -268,26 +315,26 @@ class AppProvider with ChangeNotifier {
       markupPercent: _markupPercent,
     );
 
-    // Cek apakah update atau baru (logic sederhana: selalu tambah baru utk sekarang)
     _savedRecipes.add(newRecipe);
     _saveRecipesToPrefs();
     notifyListeners();
   }
 
   void deleteSavedRecipe(int index) {
-    _savedRecipes.removeAt(index);
-    _saveRecipesToPrefs();
-    notifyListeners();
+    if (index >= 0 && index < _savedRecipes.length) {
+      _savedRecipes.removeAt(index);
+      _saveRecipesToPrefs();
+      notifyListeners();
+    }
   }
 
-  // --- Perhitungan ---
   double get totalMaterialCost => _currentRecipe.fold(0, (sum, item) => sum + item.cost);
   double get totalBaseCost => totalMaterialCost + _laborCost + _packagingCost + _shippingCost;
   double get preTaxPrice => totalBaseCost * (1 + (_markupPercent / 100));
   double get profitAmount => preTaxPrice - totalBaseCost;
 }
 
-// ================== 3. UI ==================
+// ================== 3. UI (TETAP SAMA TAPI AMAN) ==================
 
 class ProfitMateApp extends StatelessWidget {
   const ProfitMateApp({super.key});
@@ -296,7 +343,12 @@ class ProfitMateApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Profit Mate',
-      theme: ThemeData(primarySwatch: Colors.teal, useMaterial3: true, scaffoldBackgroundColor: Colors.grey[100]),
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        primarySwatch: Colors.teal, 
+        useMaterial3: true, 
+        scaffoldBackgroundColor: Colors.grey[100]
+      ),
       home: const MainNavigation(),
     );
   }
@@ -359,7 +411,6 @@ class CalculatorScreen extends StatelessWidget {
                   onChanged: (val) => provider.updateCosts(name: val),
                 ),
                 const SizedBox(height: 15),
-                // Section 1: Bahan
                 const Text("1. Komposisi", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.teal)),
                 Card(
                   child: Column(
@@ -376,7 +427,6 @@ class CalculatorScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 15),
-                // Section 2: Biaya
                 const Text("2. Biaya & Margin", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.teal)),
                 Card(
                   child: Padding(
@@ -395,7 +445,6 @@ class CalculatorScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 20),
-                // Result
                 Container(
                   padding: const EdgeInsets.all(15),
                   decoration: BoxDecoration(color: Colors.teal, borderRadius: BorderRadius.circular(10)),
@@ -445,7 +494,10 @@ class CalculatorScreen extends StatelessWidget {
             trailing: const Icon(Icons.add),
             onTap: () {
               Navigator.pop(ctx);
-              _inputQty(context, prov.materials[i]);
+              // Delay sedikit agar bottom sheet tutup dulu
+              Future.delayed(const Duration(milliseconds: 100), () {
+                 if (context.mounted) _inputQty(context, prov.materials[i]);
+              });
             },
           ),
         );
@@ -488,7 +540,7 @@ class CalculatorScreen extends StatelessWidget {
   }
 }
 
-// --- SCREEN 2: BUKU RESEP (DATABASE) ---
+// --- SCREEN 2: BUKU RESEP ---
 
 class RecipeBookScreen extends StatelessWidget {
   const RecipeBookScreen({super.key});
@@ -506,7 +558,6 @@ class RecipeBookScreen extends StatelessWidget {
             itemCount: provider.savedRecipes.length,
             itemBuilder: (ctx, i) {
               final recipe = provider.savedRecipes[i];
-              // Hitung total on the fly
               double matCost = recipe.materials.fold(0, (sum, item) => sum + (item.cost));
               double totalHpp = matCost + recipe.laborCost + recipe.packagingCost + recipe.shippingCost;
               double sellPrice = totalHpp * (1 + recipe.markupPercent / 100);
@@ -548,6 +599,8 @@ class MaterialListScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = Provider.of<AppProvider>(context);
+    final currency = NumberFormat.currency(locale: 'id_ID', symbol: 'Rp ', decimalDigits: 0);
+
     return Scaffold(
       appBar: AppBar(title: const Text('Stok Bahan Baku')),
       floatingActionButton: FloatingActionButton(
@@ -559,9 +612,9 @@ class MaterialListScreen extends StatelessWidget {
         itemBuilder: (ctx, i) {
           final item = provider.materials[i];
           return ListTile(
-            leading: CircleAvatar(child: Text(item.name[0])),
+            leading: CircleAvatar(child: Text(item.name.isNotEmpty ? item.name[0] : '?')),
             title: Text(item.name),
-            subtitle: Text("Rp ${item.totalCost} / ${item.quantity} ${item.unit}"),
+            subtitle: Text("Rp ${currency.format(item.totalCost)} / ${item.quantity} ${item.unit}"),
             trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.grey), onPressed: ()=> provider.deleteMaterial(i)),
           );
         },
